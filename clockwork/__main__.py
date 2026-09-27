@@ -1,93 +1,70 @@
-#!/usr/bin/python
-# -*- coding:utf-8 -*-
+"""Command line entry point."""
 
-"""
-Main script
-"""
+from __future__ import annotations
 
 import argparse
 import os
-import sys
 import re
-import util
+import sys
+
+import display
 import fs
+import poem
+import util
+
+TIME_PATTERN = re.compile(r"^([01]?[0-9]|2[0-3]):[0-5][0-9]$")
 
 
-def main():
-    """
-    Main entry point for the command line. Parse the arguments and call to the main process.
-    :return:
-    """
+def main() -> None:
     print("### \033[1m\033[4mclockwork\033[0m\033[1m/ai\033[0m ###")
     args = get_arguments()
     util.init()
+    util.DRY_RUN = args.dry_run
 
-    if args.dry_run:
-        util.DRY_RUN = True
-
-    if fs.check_lock():
+    if fs.is_locked():
         print("[warning] Display is currently locked, skipping execution")
         return
-    else:
-        fs.lock()
 
+    fs.lock()
     try:
         run_function(args)
     finally:
         fs.unlock()
 
 
-def run_function(args):
-    import display
-    import poem
-    override_time = None
+def run_function(args: argparse.Namespace) -> None:
+    function = args.function
+    if function is not None and function not in util.SUPPORTED_FUNCTIONS and not TIME_PATTERN.match(function):
+        sys.exit("[error] Not supported function")
 
-    if args.function is not None and args.function not in util.SUPPORTED_FUNCTIONS:
-        if re.match(r"^([01]?[0-9]|2[0-3]):[0-5][0-9]$", args.function):
-            override_time = args.function
-        else:
-            sys.exit("[error] Not supported function")
-
-    if args.function == "clear":
+    if function == "clear":
         display.clear()
-    elif args.function == "intro":
+    elif function == "intro":
         display.intro()
-    elif args.function == "demo":
+    elif function == "demo":
         display.intro()
         poem.demo()
         display.clear()
-    elif args.function == "display":
+    elif function == "display":
         print("[info] Custom display")
         display.draw_text(args.additional, "Custom", True)
-    elif args.function == "ask":
+    elif function == "ask":
         print("[info] Ask")
-        answer = poem.ask_ai(os.environ.get("OPENAI_ASK_PROMPT"), args.additional)
+        answer = poem.ask_ai(os.environ.get("OPENAI_ASK_PROMPT", ""), args.additional)
         if answer:
             display.draw_text(answer, "Answer")
     else:
-        poem.current_time_poem(override_time)
+        poem.current_time_poem(function)
 
 
-def get_arguments():
-    """
-    :return:
-    """
-    parser = argparse.ArgumentParser(prog='clockwork/ai',
-                                     description='Generate ai poems by current time for displaying them on a '
-                                                 'e-ink display.')
-    parser.add_argument('function',
-                        help='Functions to adjust the script',
-                        nargs='?',
-                        type=str)
-    parser.add_argument('additional',
-                        help='Additional arguments for function',
-                        nargs='?',
-                        type=str)
-    parser.add_argument('-dr', '--dry-run',
-                        help='Skipping drawing image to e-ink display',
-                        required=False,
-                        action='store_true')
-
+def get_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="clockwork/ai",
+        description="Generate ai poems by current time for displaying them on a e-ink display.",
+    )
+    parser.add_argument("function", nargs="?", help="Function to run, or a time like 09:41")
+    parser.add_argument("additional", nargs="?", help="Additional argument for the function")
+    parser.add_argument("-dr", "--dry-run", action="store_true", help="Save images under var/debug instead of drawing")
     return parser.parse_args()
 
 

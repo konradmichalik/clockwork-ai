@@ -1,212 +1,134 @@
-#!/usr/bin/python
-# -*- coding:utf-8 -*-
+"""Choose or generate the poem for the current time."""
 
-"""Module providing a function for generating an AI poem."""
+from __future__ import annotations
 
-from datetime import datetime
-import display
-import fs
 import logging
 import os
-import openai
 import random
-import requests
 import sys
 import time
+from datetime import datetime
 
-CLIENT = None
+import display
+import fs
+import util
 
-DEMO_POEMS = [
-    "Am Horizont, wo Lichter blüh\'n,\nzeigt die Uhr 17:17, in Abendglüh\'n.",
+DEMO_POEMS = (
+    "Am Horizont, wo Lichter blüh'n,\nzeigt die Uhr 17:17, in Abendglüh'n.",
     "Beim Dämmerlicht, so zart und fein, \nschlägt es 17:16, der Tag neigt sich dem Sein.",
     "Die Schatten lang, der Abend naht, \n17:15, in stiller Stadt.",
     "Das Tageslicht schwindet sacht,\n17:14, die Nacht erwacht.",
     "In sanftem Licht, das Abendrot, \nzeigt 17:13, der Tag im Lot.",
-    "Der Tag neigt sich, leis und mild,\num 17:12, die Welt verhüllt."
-]
+    "Der Tag neigt sich, leis und mild,\num 17:12, die Welt verhüllt.",
+)
+# Generous enough for a local model that has to be loaded first
+API_TIMEOUT = 120
+
+_client = None
 
 
-def init():
-    """
-    Initialize openai api client
-    :return:
-    """
-    global CLIENT
-
-    if os.environ.get("OPENAI_API_KEY") == "":
-        sys.exit("[error] Missing openai api key")
-
-    CLIENT = openai.OpenAI(
-        api_key=os.environ.get("OPENAI_API_KEY"),
-    )
+def _openai():
+    # Imported on demand: loading the SDK takes about 15 seconds on a Pi Zero,
+    # and most runs show a stored poem without ever calling the API.
+    import openai  # pylint: disable=import-outside-toplevel
+    return openai
 
 
-def current_time_poem(override_time=None):
-    """
-    Create new poem about current time
-    :param override_time:
-    :return:
-    """
+def client():
+    """OpenAI compatible client."""
+    global _client
+    if _client is None:
+        if not os.environ.get("OPENAI_API_KEY"):
+            sys.exit("[error] Missing openai api key")
+        _client = _openai().OpenAI(timeout=API_TIMEOUT, max_retries=1)
+    return _client
+
+
+def show(clock_time: str, poem: str, stored: bool = False) -> None:
+    footer = clock_time if util.env_bool("CLOCKWORK_SHOW_TIME") else False
+    display.draw_text(poem, footer, stored)
+
+
+def current_time_poem(override_time: str | None = None) -> None:
     logging.info("[info] Create current time poem")
-    current_time = datetime.now().strftime("%H:%M") if override_time is None else override_time
-    chat_completion = None
+    clock_time = override_time or datetime.now().strftime("%H:%M")
 
-    if reuse_poem(current_time):
+    if util.env_bool("CLOCKWORK_REUSE") and prefer_storage() and show_stored(clock_time):
         return
 
-    poem = ask_ai(os.environ.get("OPENAI_CLOCKWORK_SYSTEM_PROMPT"), current_time)
+    poem = generate(clock_time)
     if poem:
-        if bool(os.environ.get("CLOCKWORK_VALIDATE")):
-            original_poem = poem
-            new_poem = ask_ai(
-                os.environ.get("OPENAI_CLOCKWORK_SYSTEM_PROMPT"),
-                current_time,
-                poem,
-                os.environ.get("OPENAI_CLOCKWORK_VALIDATION_PROMPT").replace("<current_time>", current_time)
-            )
-            if new_poem:
-                poem = new_poem
-                logging.info(
-                    "[openai] %s (correct) //  \"%s\" --> \"%s\"",
-                    current_time,
-                    original_poem.replace('\r', '').replace('\n', ''),
-                    poem.replace('\r', '').replace('\n', '')
-                )
+        _log("openai", clock_time, poem)
+        fs.write(clock_time, poem)
+        show(clock_time, poem)
+        return
 
-        logging.info(
-            "[openai] %s // \"%s\"",
-            current_time,
-            poem.replace('\r', '').replace('\n', '')
-        )
-        fs.write(current_time, poem)
-        display.draw_text(poem, (current_time if bool(os.environ.get("CLOCKWORK_SHOW_TIME")) else False))
+    # API unreachable, fall back to a stored poem for some kind of offline mode
+    show_stored(clock_time)
 
 
-def ask_ai(system, user, assistant=None, validation=None):
-    """
-    Request the openai api
-    :param system:
-    :param user:
-    :param assistant:
-    :param validation:
-    :return:
-    """
-    if CLIENT is None:
-        init()
+def generate(clock_time: str) -> str | None:
+    system = os.environ.get("OPENAI_CLOCKWORK_SYSTEM_PROMPT", "")
+    poem = ask_ai(system, clock_time)
+    if not poem or not util.env_bool("CLOCKWORK_VALIDATE"):
+        return poem
 
-    logging.info(
-        "[openai] request: %s",
-        user
-    )
+    validation = os.environ.get("OPENAI_CLOCKWORK_VALIDATION_PROMPT", "").replace("<current_time>", clock_time)
+    corrected = ask_ai(system, clock_time, poem, validation)
+    if not corrected:
+        return poem
+
+    logging.info("[openai] %s (correct) //  \"%s\" --> \"%s\"", clock_time, _one_line(poem), _one_line(corrected))
+    return corrected
+
+
+def ask_ai(system: str, user: str, assistant: str | None = None, validation: str | None = None) -> str | None:
+    logging.info("[openai] request: %s", user)
     messages = [
-        {
-            "role": "system",
-            "content": system,
-        },
-        {
-            "role": "user",
-            "content": user
-        },
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
     ]
     if assistant is not None and validation is not None:
         messages += [
-            {
-                "role": "assistant",
-                "content": assistant,
-            },
-            {
-                "role": "user",
-                "content": validation
-            },
+            {"role": "assistant", "content": assistant},
+            {"role": "user", "content": validation},
         ]
 
+    openai = _openai()
     try:
-        chat_completion = CLIENT.chat.completions.create(
-            messages=messages,
-            model=os.environ.get("OPENAI_API_MODEL"),
-        )
-    except openai.APIConnectionError as e:
-        logging.error("The server could not be reached: %s", e.__cause__)
-        return False
-    except openai.RateLimitError as e:
-        logging.error("RateLimit reached")
-        return False
-    except openai.APIStatusError as e:
-        logging.error("API error (%s): %s", e.status_code, e.response)
+        completion = client().chat.completions.create(messages=messages, model=os.environ.get("OPENAI_API_MODEL"))
+    except openai.APIError as error:
+        logging.error("[openai] Request failed: %s", error)
+        return None
+    return completion.choices[0].message.content
+
+
+def show_stored(clock_time: str) -> bool:
+    poem = fs.read(clock_time)
+    if not poem:
         return False
 
-    if chat_completion is not None:
-        return chat_completion.choices[0].message.content
-    return False
+    _log("local", clock_time, poem)
+    show(clock_time, poem, stored=True)
+    return True
 
 
-def reuse_poem(current_time):
-    """
-    Reuse an existing poem from storage
-    :param current_time:
-    :return:
-    """
-    # check if option for CLOCKWORK_REUSE is enabled and random source decision (api vs fs)
-    # or try to use a stored poem if internet connection is not available (offline mode)
-    if (bool(os.environ.get("CLOCKWORK_REUSE")) and random_bool()) or not check_connection():
-        # reuse previous poems to save rate limit
-        previous_poem = fs.read(current_time)
-        if previous_poem:
-            logging.info(
-                "[local] %s // \"%s\"",
-                current_time,
-                previous_poem.replace('\r', '').replace('\n', '')
-            )
-            display.draw_text(
-                previous_poem,
-                additional_text=(current_time if bool(os.environ.get("CLOCKWORK_SHOW_TIME")) else False),
-                additional_hint=True)
-            return True
-    return False
+def prefer_storage() -> bool:
+    """Decide between API and storage. CLOCKWORK_RANDOM_FACTOR=8 means 1 (api) to 8 (storage)."""
+    factor = util.env_int("CLOCKWORK_RANDOM_FACTOR", 1)
+    return random.randrange(factor + 1) != 0
 
 
-def random_bool():
-    """
-    Returns a random bool
-    Can be influenced by the env var "CLOCKWORK_RANDOM_FACTOR"
-    """
-    if os.environ.get("CLOCKWORK_RANDOM_FACTOR"):
-        return not bool(random.randrange(0, int(os.environ.get("CLOCKWORK_RANDOM_FACTOR"))))
-    return bool(random.getrandbits(1))
-
-
-def check_connection():
-    """
-    Detect an internet connection.
-    :return:
-    """
-    connection = None
-    try:
-        r = requests.get("https://www.google.de/")
-        r.raise_for_status()
-        connection = True
-    except requests.ConnectionError as e:
-        logging.error("Connection error: %s", e)
-        connection = False
-    except requests.HTTPError as e:
-        logging.error("HTTP error: %s", e)
-        connection = False
-    except requests.Timeout as e:
-        logging.error("Timeout error: %s", e)
-        connection = False
-    except requests.RequestException as e:
-        logging.error("Request exception: %s", e)
-        connection = False
-    finally:
-        return connection
-
-
-def demo():
-    """
-    Run demo poems
-    :return:
-    """
+def demo() -> None:
     print("[info] Demo")
-    for slogan in DEMO_POEMS:
-        display.draw_text(slogan, "Demo")
+    for poem in DEMO_POEMS:
+        display.draw_text(poem, "Demo")
         time.sleep(4)
+
+
+def _one_line(text: str) -> str:
+    return text.replace("\r", "").replace("\n", "")
+
+
+def _log(source: str, clock_time: str, poem: str) -> None:
+    logging.info("[%s] %s // \"%s\"", source, clock_time, _one_line(poem))

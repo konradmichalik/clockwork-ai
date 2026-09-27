@@ -1,29 +1,19 @@
-#!/usr/bin/python
-# -*- coding:utf-8 -*-
-""""""
-import util
-import os
+"""Driver wrapper for the waveshare 2.13 inch e-paper display (V3)."""
+
 import sys
+from pathlib import Path
+from types import SimpleNamespace
 
-LIB_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'lib')
-if os.path.exists(LIB_DIR):
-    sys.path.append(LIB_DIR)
+import util
 
-if not util.DRY_RUN:
-    from waveshare_epd import epd2in13_V3
+sys.path.append(str(Path(__file__).resolve().parent / "lib"))
 
 
 def init():
-    """
-    Initialize display
-    :return:
-    """
     if util.DRY_RUN:
-        return type('new', (object,), {
-            "width": 122,
-            "height": 250
-        })
-    else:
-        epd = epd2in13_V3.EPD()
-        epd.init()
-        return epd
+        return SimpleNamespace(width=122, height=250)
+
+    from waveshare_epd import epd2in13_V3  # pylint: disable=import-outside-toplevel,import-error
+    epd = epd2in13_V3.EPD()
+    epd.init()
+    return epd

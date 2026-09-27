@@ -1,80 +1,117 @@
-#!/usr/bin/python
-# -*- coding:utf-8 -*-
-"""Module providing a function for display text on a epd screen."""
+"""Render text as an image and send it to the e-paper display."""
 
+from __future__ import annotations
+
+import importlib
 import os
 import sys
+import textwrap
 import time
-import textwrap3
-import importlib
+from dataclasses import dataclass
+from functools import lru_cache
+
 from PIL import Image, ImageDraw, ImageFont
+
 import util
 
-FONT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'font')
+FONT_DIR = util.ROOT / "font"
+DEBUG_DIR = util.VAR_DIR / "debug"
+FOOTER_FONT = "Font.ttc"
+LINE_SPACING = 1.4
+# Share of the display height one line may take when deciding whether the text fits
+LINE_BUDGET = 1.5
 
 
-EPD = None
-FONT = None
-MAX_CHAR_HEIGHT = None
-MAX_FONT = None
-FONT_STEPS = None
-DOT_SIZE = None
-MARGIN = None
-DISPLAY_SETTINGS = {
-    "epd2in13": {
-        "max_font": 36,
-        "font_steps": 2,
-        "dot_size": 2,
-        "letter_spacing": 1.4,
-        "margin": 2
-    },
-    "epd7in5": {
-        "max_font": 92,
-        "font_steps": 4,
-        "dot_size": 4,
-        "letter_spacing": 1.4,
-        "margin": 10
-    }
+@dataclass(frozen=True)
+class Settings:
+    max_font: int
+    font_steps: int
+    dot_size: int
+    margin: int
+
+
+SETTINGS = {
+    "epd2in13": Settings(max_font=36, font_steps=2, dot_size=2, margin=2),
+    "epd7in5": Settings(max_font=92, font_steps=4, dot_size=4, margin=10),
 }
 
-
-def init():
-    """
-    Initialize display
-    :return:
-    """
-    global EPD
-    global MAX_FONT
-    global FONT_STEPS
-    global DOT_SIZE
-    global MARGIN
-
-    lib_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'epd')
-    _epd = os.environ.get("CLOCKWORK_DISPLAY")
-    if os.path.isfile(f'{lib_dir}/{_epd}.py'):
-        epd = importlib.import_module(f'epd.{_epd}')
-        EPD = epd.init()
-
-        MAX_FONT = DISPLAY_SETTINGS[_epd]["max_font"]
-        FONT_STEPS = DISPLAY_SETTINGS[_epd]["font_steps"]
-        DOT_SIZE = DISPLAY_SETTINGS[_epd]["dot_size"]
-        MARGIN = DISPLAY_SETTINGS[_epd]["margin"]
-    else:
-        sys.exit(f'[error] Not supported display: {_epd}')
+_epd = None
+_settings: Settings | None = None
 
 
-def intro():
-    """
-    Show intro image
-    :return:
-    """
-    if EPD is None:
+def init() -> None:
+    global _epd, _settings
+
+    name = os.environ.get("CLOCKWORK_DISPLAY")
+    if name not in SETTINGS:
+        sys.exit(f"[error] Not supported display: {name}")
+
+    _epd = importlib.import_module(f"epd.{name}").init()
+    _settings = SETTINGS[name]
+
+
+def _device():
+    if _epd is None:
         init()
+    return _epd
 
-    image = Image.new('1', (get_width(), get_height()), 255)
-    font = ImageFont.truetype(os.path.join(FONT_DIR, "Font.ttc"), 24)
+
+def size() -> tuple[int, int]:
+    """Width and height in landscape orientation."""
+    epd = _device()
+    return max(epd.width, epd.height), min(epd.width, epd.height)
+
+
+@lru_cache(maxsize=None)
+def font(name: str, font_size: int) -> ImageFont.FreeTypeFont:
+    return ImageFont.truetype(str(FONT_DIR / name), font_size)
+
+
+def fit_text(text: str, width: int, height: int, font_size: int):
+    """Shrink the font until the wrapped text fits. Returns font, lines and line height."""
+    font_name = os.environ.get("CLOCKWORK_FONT")
+    while True:
+        current = font(font_name, font_size)
+        widths = [current.getbbox(char)[2] for char in text]
+        max_chars = int(width / (sum(widths) / len(text)) * .9)
+        # The widest glyph serves as line height. Odd, but the layout is tuned to it.
+        line_height = max(widths)
+        lines = [line for part in text.splitlines() for line in textwrap.wrap(part, width=max_chars)]
+
+        if len(lines) <= int(height / (line_height * LINE_BUDGET)) or font_size <= _settings.font_steps:
+            return current, lines, line_height
+        font_size -= _settings.font_steps
+
+
+def draw_text(text: str, additional_text=False, additional_hint: bool = False) -> None:
+    width, height = size()
+    margin = _settings.margin
+    image = Image.new("1", (width, height), 255)
     draw = ImageDraw.Draw(image)
-    draw.text((52, 45), 'clockwork/ai', font=font, fill=0)
+
+    text_font, lines, line_height = fit_text(text, width, height, _settings.max_font)
+    y = margin
+    for line in lines:
+        draw.text((margin, y), line, font=text_font, fill=0)
+        y += line_height * LINE_SPACING
+
+    if additional_text:
+        draw.text((width, height), str(additional_text), font=font(FOOTER_FONT, 10), fill=0, align="right", anchor="rb")
+
+    if additional_hint and util.env_bool("CLOCKWORK_DEBUG"):
+        # Visual hint that a stored poem is shown
+        dot = _settings.dot_size
+        draw.ellipse([(width - margin - dot, margin), (width - margin, margin + dot)], fill=0)
+
+    print(f"[draw] {text}")
+    display(image, "draw_text")
+
+
+def intro() -> None:
+    width, height = size()
+    image = Image.new("1", (width, height), 255)
+    draw = ImageDraw.Draw(image)
+    draw.text((52, 45), "clockwork/ai", font=font(FOOTER_FONT, 24), fill=0)
 
     draw.line([(39, 80), (110, 80)], fill=0, width=2)
     draw.line([(44, 85), (80, 85)], fill=0, width=2)
@@ -82,161 +119,28 @@ def intro():
 
     draw.line([(199, 40), (150, 40)], fill=0, width=2)
     draw.line([(199, 40), (199, 60)], fill=0, width=2)
-    display(image, intro.__name__)
+    display(image, "intro")
 
     time.sleep(2)
 
 
-def draw_text(text, additional_text=False, additional_hint=False):
-    """
-    Draw text on display
-    :param text:
-    :param additional_text:
-    :param additional_hint:
-    :return:
-    """
-    if EPD is None:
-        init()
-
-    image = Image.new('1', (get_width(), get_height()), 255)
-    draw = ImageDraw.Draw(image)
-
-    lines = text_box(text, image, MAX_FONT)
-    y_text = MARGIN
-    for line in lines:
-        draw.text((MARGIN, y_text), line, font=FONT, fill=0)
-        y_text += MAX_CHAR_HEIGHT * 1.4
-
-    if additional_text:
-        draw.text(
-            (get_width(), get_height()),
-            str(additional_text),
-            font=ImageFont.truetype(os.path.join(FONT_DIR, "Font.ttc"), 10),
-            fill=0,
-            align="right",
-            anchor="rb"
-        )
-
-    if additional_hint and bool(os.environ.get("CLOCKWORK_DEBUG")):
-        # visual hint for reusing a stored poem
-        draw.ellipse(
-            [(get_width()-MARGIN-DOT_SIZE, MARGIN), (get_width()-MARGIN, MARGIN+DOT_SIZE)],
-            fill=0
-        )
-
-    print(f"[draw] {text}")
-    display(image, draw_text.__name__)
-
-
-def text_box(text, image, font_size=36):
-    """
-    Calculate a fitting text box for the desired display size
-    :param text:
-    :param image:
-    :param font_size:
-    :return:
-    """
-    global FONT
-    global MAX_CHAR_HEIGHT
-    lines = []
-
-    # consider line break in text
-    tmp_lines = text.splitlines()
-
-    FONT = get_font(os.environ.get("CLOCKWORK_FONT"), font_size)
-
-    avg_char_width = sum(FONT.getsize(char)[0] for char in text) / len(text)
-    max_char_count = int(image.size[0] / avg_char_width * .9)
-    max_char_height = max(FONT.getsize(char)[0] for char in text)
-    MAX_CHAR_HEIGHT = max_char_height
-    max_lines = int(image.size[1] / (max_char_height * 1.5)) # + line height
-
-    for tmp_line in tmp_lines:
-        lines += textwrap3.wrap(tmp_line, width=max_char_count)
-
-    # print(f"font_size: {font_size} // lines: {lines} // max_lines: {max_lines} // "
-    #        f"char_count: {max_char_count}  // char_width: {avg_char_width} // char_height: {max_char_height}")
-    if len(lines) > max_lines:
-        font_size -= FONT_STEPS
-
-        return text_box(text, image, font_size)
-
-    return lines
-
-
-def get_font(font_name, size):
-    """
-    Get local font
-    :param font_name:
-    :param size:
-    :return:
-    """
-    return ImageFont.truetype(os.path.join(FONT_DIR, font_name), size)
-
-
-def get_height():
-    """
-    Get the display height of landscape mode
-    :return:
-    """
-    if EPD.height > EPD.width:
-        return EPD.width
-    return EPD.height
-
-
-def get_width():
-    """
-    Get the display width of landscape mode
-    :return:
-    """
-    if EPD.height > EPD.width:
-        return EPD.height
-    return EPD.width
-
-
-def display(image, name=None):
-    """
-    Display the image on the screen or save them as image
-    :param image:
-    :param name:
-    :return:
-    """
-    if EPD is None:
-        init()
-
-    image = image.rotate(calc_rotation())
+def display(image: Image.Image, name: str) -> None:
+    """Show the image on the display, or save it under var/debug in dry run mode."""
+    epd = _device()
+    image = image.rotate(util.env_int("CLOCKWORK_ROTATE", 0))
     if util.DRY_RUN:
-        debugdir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
-            'var/debug'
-        )
-        if not os.path.exists(debugdir):
-            os.makedirs(debugdir)
-        image.save(f"{debugdir}/{name}.jpg")
+        DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        image.save(DEBUG_DIR / f"{name}.jpg")
     else:
-        EPD.display(EPD.getbuffer(image))
+        epd.display(epd.getbuffer(image))
 
 
-def calc_rotation():
-    """
-    Calculate the rotation of the image
-    """
-    if os.environ.get("CLOCKWORK_ROTATE"):
-        return int(os.environ.get("CLOCKWORK_ROTATE"))
-    return 0
-
-
-def clear():
-    """
-    Clear the display
-    :return:
-    """
+def clear() -> None:
     if util.DRY_RUN:
         return
-    if EPD is None:
-        init()
 
     print("[info] Clear display")
-    EPD.init()
-    EPD.Clear()
-    EPD.sleep()
+    epd = _device()
+    epd.init()
+    epd.Clear()
+    epd.sleep()

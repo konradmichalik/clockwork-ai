@@ -1,109 +1,66 @@
-#!/usr/bin/python
-# -*- coding:utf-8 -*-
+"""Poem storage and the display lock."""
 
-"""Module providing a function for accessing the filesystem."""
+from __future__ import annotations
 
-import os
-import datetime
 import json
+import logging
 import random
-storagedir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'var/storage')
-if not os.path.exists(storagedir):
-    os.makedirs(storagedir)
+import time
+from pathlib import Path
 
-lockfile = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'display.lock')
+import util
 
-
-def write(time, poem):
-    """
-    Write poem to time file
-    :param time:
-    :param poem:
-    :return:
-    """
-    filename = time.replace(":", "")
-    hourdir = time[:2]
-    filepath = f"{storagedir}/{hourdir}/{filename}.json"
-    print(f"[info] Write to storage: {filepath}")
-    content = []
-
-    if not os.path.exists(f"{storagedir}/{hourdir}"):
-        os.mkdir(f"{storagedir}/{hourdir}")
-
-    if os.path.isfile(filepath):
-        with open(filepath, 'r') as openfile:
-            content = json.load(openfile)
-
-    content += [poem]
-
-    json_object = json.dumps(content, indent=4)
-    with open(filepath, "w") as outfile:
-        outfile.write(json_object)
+STORAGE_DIR = util.VAR_DIR / "storage"
+LOCK_FILE = util.ROOT / "display.lock"
+# A run that crashed leaves the lock behind, it expires after five minutes
+LOCK_TIMEOUT = 300
 
 
-def read(time):
-    """
-    Read poems from time file
-    :param time:
-    :return:
-    """
-    filename = time.replace(":", "")
-    hourdir = time[:2]
-    filepath = f"{storagedir}/{hourdir}/{filename}.json"
-    content = None
-
-    if os.path.isfile(filepath):
-        with open(filepath, 'r') as openfile:
-            content = json.load(openfile)
-
-    if content is not None:
-        return random.choice(content)
-
-    return False
+def _path(directory: Path, clock_time: str) -> Path:
+    return directory / clock_time[:2] / f"{clock_time.replace(':', '')}.json"
 
 
-def check_lock():
-    """
-    Check if lock file is present and is not older then 5 minutes
-    :return:
-    """
-    if os.path.isfile(lockfile):
-        if check_file_expired(lockfile):
-            unlock()
-            return False
-        else:
-            return True
-    return False
+def _load(path: Path) -> list[str]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except ValueError:
+        logging.warning("[storage] Skipping broken file %s", path)
+        return []
 
 
-def check_file_expired(file_path, expired_threshold=300):
-    """
-    Check if file is older then an expired threshold
-    """
-    if not os.path.exists(file_path):
-            return False
+def write(clock_time: str, poem: str) -> None:
+    path = _path(STORAGE_DIR, clock_time)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"[info] Write to storage: {path}")
 
-    last_modified_time = os.path.getmtime(file_path)
-    last_modified_datetime = datetime.datetime.fromtimestamp(last_modified_time)
-    time_difference = datetime.datetime.now() - last_modified_datetime
-    if time_difference.total_seconds() > expired_threshold:
-        return True
-    else:
+    # Write to a temporary file first, a power cut mid-write used to leave broken JSON behind
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(_load(path) + [poem], indent=4), encoding="utf-8")
+    tmp.replace(path)
+
+
+def read(clock_time: str, directory: Path = STORAGE_DIR) -> str | None:
+    poems = _load(_path(directory, clock_time))
+    return random.choice(poems) if poems else None
+
+
+def is_locked() -> bool:
+    try:
+        age = time.time() - LOCK_FILE.stat().st_mtime
+    except FileNotFoundError:
         return False
 
-
-def lock():
-    """
-    Create lock file
-    :return:
-    """
-    open(lockfile, "w")
+    if age > LOCK_TIMEOUT:
+        unlock()
+        return False
+    return True
 
 
-def unlock():
-    """
-    Delete lock file
-    :return:
-    """
-    if os.path.exists(lockfile):
-        os.remove(lockfile)
+def lock() -> None:
+    LOCK_FILE.touch()
+
+
+def unlock() -> None:
+    LOCK_FILE.unlink(missing_ok=True)

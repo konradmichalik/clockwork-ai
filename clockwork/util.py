@@ -1,42 +1,42 @@
-#!/usr/bin/python
-# -*- coding:utf-8 -*-
+"""Paths, environment access and logging setup."""
 
-"""Module providing a function for utilities."""
+from __future__ import annotations
 
-import os
 import logging
-from dotenv import load_dotenv
+import os
 from datetime import date
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 __homepage__ = "https://github.com/jackd248/clockwork-ai"
 __version__ = "1.0.0"
 
-ENV_PATH = None
-VAR_DIR = None
-LOG_DIR = None
-# Dry run mode to prevent display image on e-ink display
+ROOT = Path(__file__).resolve().parent.parent
+VAR_DIR = ROOT / "var"
+LOG_DIR = VAR_DIR / "log"
+# Dry run mode renders images to var/debug instead of the e-ink display
 DRY_RUN = False
-SUPPORTED_FUNCTIONS = ["clear", "intro", "demo", "display", "ask"]
+SUPPORTED_FUNCTIONS = ("clear", "intro", "demo", "display", "ask")
 
 
-def init():
-    """
-    Initialize app
-    :return:
-    """
-    global ENV_PATH
-    global VAR_DIR
-    global LOG_DIR
-    ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), ".env")
-    VAR_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'var')
-    if not os.path.exists(VAR_DIR):
-        os.mkdir(VAR_DIR)
-    LOG_DIR = os.path.join(VAR_DIR, 'log')
-    if not os.path.exists(LOG_DIR):
-        os.mkdir(LOG_DIR)
+def init() -> None:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    load_dotenv(ROOT / ".env")
 
-    load_dotenv(ENV_PATH)
+    if env_bool("CLOCKWORK_DEBUG"):
+        logging.basicConfig(
+            filename=LOG_DIR / f"app_{date.today()}.log",
+            encoding="utf-8",
+            level=logging.INFO,
+        )
 
-    if bool(os.environ.get("CLOCKWORK_DEBUG")):
-        logging.basicConfig(filename=f"{LOG_DIR}/app_{date.today()}.log", encoding='utf-8', level=logging.INFO)
 
+def env_bool(name: str) -> bool:
+    """True for "true", "1", "yes" or "on". A plain bool() would also treat "False" as true."""
+    return os.environ.get(name, "").strip().lower() in ("true", "1", "yes", "on")
+
+
+def env_int(name: str, default: int) -> int:
+    value = os.environ.get(name, "").strip()
+    return int(value) if value else default
