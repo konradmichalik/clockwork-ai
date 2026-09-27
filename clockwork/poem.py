@@ -35,12 +35,14 @@ def _openai():
 
 
 def client():
-    """OpenAI compatible client."""
+    """OpenAI compatible client. OPENAI_BASE_URL points it to another server, e.g. Ollama."""
     global _client
     if _client is None:
         if not os.environ.get("OPENAI_API_KEY"):
             sys.exit("[error] Missing openai api key")
-        _client = _openai().OpenAI(timeout=API_TIMEOUT, max_retries=1)
+        # An empty OPENAI_BASE_URL from .env.dist would otherwise break the SDK default
+        base_url = os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+        _client = _openai().OpenAI(base_url=base_url, timeout=API_TIMEOUT, max_retries=1)
     return _client
 
 
@@ -52,6 +54,12 @@ def show(clock_time: str, poem: str, stored: bool = False) -> None:
 def current_time_poem(override_time: str | None = None) -> None:
     logging.info("[info] Create current time poem")
     clock_time = override_time or datetime.now().strftime("%H:%M")
+
+    daily = fs.read_daily(clock_time)
+    if daily:
+        _log("daily", clock_time, daily)
+        show(clock_time, daily)
+        return
 
     if util.env_bool("CLOCKWORK_REUSE") and prefer_storage() and show_stored(clock_time):
         return

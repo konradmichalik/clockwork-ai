@@ -11,6 +11,7 @@ Simple DIY clock project to generate AI poems by current time using a raspberry 
 ![clockwork demo](img/demo.jpg)
 
 - [General](#general)
+    * [Daily poems](#daily-poems)
     * [Reuse](#reuse)
     * [Lock](#lock)
 - [Installation](#installation)
@@ -20,6 +21,7 @@ Simple DIY clock project to generate AI poems by current time using a raspberry 
     * [Software](#software)
     * [Permanent setup](#permanent-setup)
 - [Configuration](#configuration)
+    * [Local model](#local-model)
     * [Hardware support](#hardware-support)
     * [Prompt](#prompt)
     * [Validation](#validation)
@@ -61,11 +63,21 @@ General command line functionalities of the python app:
 
 The `--dry-run` option prevent the display process on the e-ink display and generates images instead under `var/debug/`.
 
+### Daily poems
+
+`tools/batch.py` pre-generates the poems for a whole day with a local model via [Ollama](https://ollama.com), for example once at night on a stronger machine than the Pi. Each request gets the daytime, the season, the hourly weather forecast for Dresden from [Open-Meteo](https://open-meteo.com) and a random motif as background. Several candidates per time are checked for two lines, the time in digits, a rhyme and a maximum length, so the font on the display does not shrink too much. The best ones are written to `var/daily/YYYY-MM-DD/HH/HHMM.json`.
+
+```bash
+python3 tools/batch.py --host http://localhost:11434 --model gemma3:12b --out var/daily
+```
+
+Copy the result to `var/daily/` on the Pi, e.g. with `rsync`. If a poem for today exists, clockwork shows it without calling the api. Days other than today are ignored. The script needs no dependencies beyond Python 3.9.
+
 ### Reuse
 
 The fs component stores the received poems to json files, e.g. `var/storage/12/1245.json`. If the environment variable `CLOCKWORK_REUSE` is set to true, the algorithm randomly uses stored poems instead of calling the api to reuse them. 
 
-The script also checks if an internet connection is available to call the api. If not so, the script will show a stored poem if available for some kind of offline usage. 
+If the api is not reachable, the script shows a stored poem if available for some kind of offline usage. 
 
 ### Lock
 
@@ -148,6 +160,16 @@ All further configuration options are available within your `.env` file.
 
 The 3.5 model is stored as default model for the openai api because it's the cheapest one so far. If you want to use another model, adjust the `OPENAI_API_MODEL` environment variable. See https://platform.openai.com/docs/models.
 
+### Local model
+
+The api client works with every OpenAI compatible server. To use a local model via [Ollama](https://ollama.com) instead of openai, point `OPENAI_BASE_URL` to it. Ollama ignores the api key, but it must not be empty:
+
+```dotenv
+OPENAI_BASE_URL="http://192.168.178.140:11434/v1"
+OPENAI_API_KEY="ollama"
+OPENAI_API_MODEL="gemma3:12b"
+```
+
 ### Hardware support
 
 Currently, the both displays are supported:
@@ -182,7 +204,7 @@ Download a custom TrueType font (e.g. at https://fonts2u.com/), save them within
 
 ### Coincidence
 
-To influence the random function for choosing between api request and storage, set and increase the `CLOCKWORK_RANDOM_FACTOR` environment variable with an integer. Normally, it's 1 (api) to 1 (storage) as ratio. To increase the usage of the storage increase the env var, e.g. to 8 for 1 (api) to 8 (storage).
+To influence the random function for choosing between api request and storage, set and increase the `CLOCKWORK_RANDOM_FACTOR` environment variable with an integer. Normally, it's 1 (api) to 1 (storage) as ratio. To increase the usage of the storage increase the env var, e.g. to 8 for 1 (api) to 8 (storage). Daily poems always take precedence.
 
 ### Debug
 

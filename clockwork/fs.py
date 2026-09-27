@@ -6,11 +6,14 @@ import json
 import logging
 import random
 import time
+from datetime import date
 from pathlib import Path
 
 import util
 
 STORAGE_DIR = util.VAR_DIR / "storage"
+# Poems pre-generated for the current day, see tools/batch.py
+DAILY_DIR = util.VAR_DIR / "daily"
 LOCK_FILE = util.ROOT / "display.lock"
 # A run that crashed leaves the lock behind, it expires after five minutes
 LOCK_TIMEOUT = 300
@@ -44,6 +47,10 @@ def write(clock_time: str, poem: str) -> None:
 def read(clock_time: str, directory: Path = STORAGE_DIR) -> str | None:
     poems = _load(_path(directory, clock_time))
     return random.choice(poems) if poems else None
+
+
+def read_daily(clock_time: str) -> str | None:
+    return read(clock_time, DAILY_DIR / date.today().isoformat())
 
 
 def is_locked() -> bool:
