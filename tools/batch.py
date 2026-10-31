@@ -20,11 +20,44 @@ SYSTEM_PROMPT = (
     "Du bist eine poetische Uhr. Schreibe zur genannten Uhrzeit ein Gedicht aus genau zwei Zeilen "
     "mit höchstens 25 Wörtern. Die Uhrzeit steht genau einmal und genau so in Ziffern im Gedicht, "
     "wie sie genannt wird, zum Beispiel 07:42, und zwar nicht am Ende einer Zeile. Schreibe keine "
-    "Zahlen als Wörter aus. Die beiden Zeilen reimen sich am Ende, ohne dasselbe Reimwort zu "
-    "verwenden. Das Gedicht passt zur genannten Tageszeit und greift das genannte Motiv auf. "
-    "Jahreszeit und Wetter sind Hintergrund, sie dürfen anklingen, müssen aber nicht genannt werden. "
+    "Zahlen als Wörter aus. Die beiden Zeilen reimen sich am Ende mit echten deutschen Wörtern, "
+    "ohne dasselbe Reimwort zu verwenden und ohne Wörter mit Apostroph zu kürzen. Das Gedicht "
+    "passt zur genannten Tageszeit, greift das genannte Motiv auf und setzt die Uhrzeit an die "
+    "genannte Stelle. Jahreszeit und Wetter sind Hintergrund, sie dürfen anklingen, müssen aber "
+    "nicht genannt werden. "
     "Antworte nur mit den zwei Zeilen, ohne Markdown, ohne Anführungszeichen, ohne Erklärungen."
 )
+# gemma3 put the time into the first line in 93 % of the poems, mostly as "Der Nebel steigt,
+# 07:40, ...". A position per request breaks that template up.
+TIME_POSITIONS = [
+    "Uhrzeit am Anfang der ersten Zeile", "Uhrzeit in der Mitte der ersten Zeile",
+    "Uhrzeit am Anfang der zweiten Zeile", "Uhrzeit in der Mitte der zweiten Zeile",
+]
+# Two of these go into every request as a model for tone and form. The 58,000 archived
+# gpt-4o-mini poems were no help here, most of them read like "Es ist nun 21:15, eine ruhige Pracht".
+EXAMPLES = [
+    "Es ist 07:10, die Milch kocht über,\nund in der Küche wird der Morgen trüber.",
+    "Der Hund sitzt hungrig vor der Tür,\num 06:45 kann er nichts dafür.",
+    "Um 06:52 gähnt der halbe Bahnsteig laut,\nder Zug kommt spät, weil niemand ihm vertraut.",
+    "Die Katze liegt um 14:20 auf dem Buch,\nsie hält es für ihr warmes Sonnentuch.",
+    "Um 16:05 klebt Mehl an jeder Hand,\nder Kuchen wächst bis an den Tellerrand.",
+    "Ein Fahrrad lehnt am Zaun, der Reifen platt,\num 17:30 schiebt man heim, die Beine matt.",
+    "Um 18:10 gehen die Laternen an,\nund jeder Schatten wird ein langer Mann.",
+    "Der Brief liegt ungelesen auf dem Tisch,\num 19:45 riecht die Küche schon nach Fisch.",
+    "Um 21:20 summt der Kühlschrank sein Gedicht,\ndie Wohnung schläft, nur er noch nicht.",
+    "Der Mond hängt schief um 22:35 über dem Dach,\ndie Katze schläft, der Nachbar ist noch wach.",
+    "Um 09:15 ruft die Oma an,\nsie fragt, ob man den Kuchen essen kann.",
+    "Um 10:30 duftet es nach Zimt und Brot,\nder Bäcker winkt, die Wangen mehlig rot.",
+    "Ein Schiff legt ab um 11:50 aus dem Hafen,\ndie Möwen schreien, wollen gar nicht schlafen.",
+    "Die Treppe knarrt um 13:05 bei jedem Schritt,\nder Nachbar schleppt die Kisten, ich trag mit.",
+    "Am Fluss zieht um 15:40 ein Kahn vorbei,\nein Kind winkt ihm, die Enten sind dabei.",
+    "Die Kerze brennt, das Buch ist fast zu Ende,\num 20:25 blättern schneller beide Hände.",
+    "Der Wind dreht um 08:20 den Wetterhahn,\ndie Katze schaut ihn empört von unten an.",
+    "Die Tauben streiten um ein Stück vom Brot,\num 12:40 kennt der Marktplatz keine Not.",
+]
+# With the weather in every request, a rainy day turned almost every poem into fog, drops and
+# falling leaves. Only this share of the requests gets season and weather.
+BACKGROUND_SHARE = 0.3
 DAYTIMES = [
     (5, "Nacht"), (8, "früher Morgen"), (11, "Vormittag"), (14, "Mittag"),
     (17, "Nachmittag"), (20, "Abend"), (22, "später Abend"), (24, "Nacht"),
@@ -39,6 +72,14 @@ NUMBER_WORD = re.compile(
     r"\b(zwei|drei|vier|fünf|sechs|sieben|acht|neun|zehn|elf|zwölf|\w*(zehn|zwanzig|dreißig|vierzig|fünfzig))\b",
     re.IGNORECASE,
 )
+# "Die 15:20 trüben den Blick", "19:40h"
+ARTICLE_BEFORE_TIME = re.compile(r"\b(der|die|das|den|dem)\s+\d\d:\d\d", re.IGNORECASE)
+SUFFIX_AFTER_TIME = re.compile(r"\d\d:\d\d[a-zäöü]", re.IGNORECASE)
+# Elisions like "leis'" or "Will'" were mostly forced rhymes.
+ELISION = re.compile(r"[a-zäöüß]['’]", re.IGNORECASE)
+# Repeated openings and rhyme pairs weigh more than a repeated word when choosing poems.
+OPENING_WEIGHT = 8
+RHYME_WEIGHT = 8
 # Longer poems shrink the font on the display. 110 characters keep it at the size most
 # of the previous gpt-4o-mini poems had on the 7.5 inch display.
 MAX_CHARS = 110
@@ -123,6 +164,11 @@ def rhyme_core(word):
     return re.sub(r"(.)\1", r"\1", match.group(0)) if match else word
 
 
+def is_compound_of(word, part):
+    """'Abschiedsschmerz' ends in 'Schmerz', but 'Brot' and 'trüber' are real rhymes on 'rot' and 'über'."""
+    return word.endswith(part) and len(word) - len(part) >= 3
+
+
 def rejection(lines, clock_time):
     if len(lines) != 2:
         return f"{len(lines)} Zeilen"
@@ -131,12 +177,16 @@ def rejection(lines, clock_time):
         return "Uhrzeit fehlt" if clock_time not in text else "Uhrzeit doppelt"
     if NUMBER_WORD.search(text):
         return "Zahl ausgeschrieben"
+    if ARTICLE_BEFORE_TIME.search(text) or SUFFIX_AFTER_TIME.search(text):
+        return "Uhrzeit als Wort benutzt"
+    if ELISION.search(text):
+        return "Apostroph"
     if len("\n".join(lines)) > MAX_CHARS:
         return "zu lang"
     first, second = last_word(lines[0]), last_word(lines[1])
     if any(char.isdigit() for char in first + second):
         return "Uhrzeit am Zeilenende"
-    if first == second:
+    if first == second or is_compound_of(first, second) or is_compound_of(second, first):
         return "gleiches Reimwort"
     if rhyme_core(first) != rhyme_core(second):
         return f"kein Reim ({first}/{second})"
@@ -147,19 +197,52 @@ def content_words(poem):
     return set(re.findall(r"[a-zäöüß]{4,}", poem.lower()))
 
 
+def opening(poem):
+    return "anfang:" + " ".join(poem.lower().split()[:2])
+
+
+def rhyme_pair(poem):
+    return "reim:" + "/".join(sorted(last_word(line) for line in poem.splitlines()))
+
+
 def repetition_score(poem, usage):
-    """Lower is better: how often the poem's words were already used in accepted poems."""
-    return sum(usage[word] for word in content_words(poem))
+    """Lower is better: how often the poem's words, opening and rhyme pair were already used."""
+    return (sum(usage[word] for word in content_words(poem))
+            + OPENING_WEIGHT * usage[opening(poem)] + RHYME_WEIGHT * usage[rhyme_pair(poem)])
 
 
-def candidate(args, clock_time, context):
+def load_dictionary(path):
+    """Hunspell dictionary, or None. Catches made-up words like 'Frötchen' or 'Hafengezirr'."""
+    if not path:
+        return None
+    from spylls.hunspell import Dictionary
+    return Dictionary.from_files(str(path))
+
+
+def unknown_word(lines, dictionary):
+    for word in re.findall(r"[A-Za-zÄÖÜäöüß]+", " ".join(lines)):
+        if not any(dictionary.lookup(form) for form in (word, word.capitalize(), word.lower())):
+            return word
+    return None
+
+
+def candidate(args, clock_time, context, dictionary):
     motif = random.choice(MOTIFS)
-    prompt = f"{clock_time}, {daytime(clock_time)}, {context}, Motiv: {motif}"
+    parts = [clock_time, daytime(clock_time), random.choice(TIME_POSITIONS)]
+    if random.random() < BACKGROUND_SHARE:
+        parts.append(context)
+    prompt = ", ".join(parts + [f"Motiv: {motif}"])
+    examples = "\n\n".join(random.sample(EXAMPLES, 2))
     lines = clean(chat(args.host, args.model, [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": f"{SYSTEM_PROMPT}\n\nSo klingt es gut, schreibe aber "
+                                      f"ein eigenes Gedicht mit anderen Bildern:\n\n{examples}"},
         {"role": "user", "content": prompt},
     ]))
-    return {"prompt": prompt, "poem": "\n".join(lines), "rejected": rejection(lines, clock_time)}
+    rejected = rejection(lines, clock_time)
+    if rejected is None and dictionary:
+        word = unknown_word(lines, dictionary)
+        rejected = f"unbekanntes Wort ({word})" if word else None
+    return {"prompt": prompt, "poem": "\n".join(lines), "rejected": rejected}
 
 
 def all_times(step, first_hour, last_hour):
@@ -177,6 +260,7 @@ def write_storage(out, clock_time, poems):
 def generate(args):
     args.out.mkdir(parents=True, exist_ok=True)
     hourly_weather = forecast()
+    dictionary = load_dictionary(args.dictionary)
     print("Wetter:", ", ".join(f"{h:02d} {w}" for h, w in enumerate(hourly_weather)) or "keins")
     usage = Counter()
     report = []
@@ -185,14 +269,14 @@ def generate(args):
         candidates = []
         for _ in range(args.candidates):
             try:
-                candidates.append(candidate(args, clock_time, background(clock_time, hourly_weather)))
+                candidates.append(candidate(args, clock_time, background(clock_time, hourly_weather), dictionary))
             except OSError as error:
                 print(f"[error] {clock_time}: {error}", file=sys.stderr)
 
         valid = [c["poem"] for c in candidates if c["rejected"] is None]
         chosen = sorted(valid, key=lambda poem: repetition_score(poem, usage))[:args.keep]
         for poem in chosen:
-            usage.update(content_words(poem))
+            usage.update(content_words(poem) | {opening(poem), rhyme_pair(poem)})
         if chosen:
             write_storage(args.out, clock_time, chosen)
 
@@ -202,19 +286,26 @@ def generate(args):
     (args.out / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False))
     covered = sum(1 for entry in report if entry["chosen"])
     print(f"\nAbgedeckt: {covered}/{len(report)} Uhrzeiten")
-    print("Häufigste Wörter:", ", ".join(f"{w} ({n})" for w, n in usage.most_common(10)))
+    for label, prefix in (("Wörter", None), ("Anfänge", "anfang:"), ("Reime", "reim:")):
+        counts = [(key, n) for key, n in usage.most_common()
+                  if (key.startswith(prefix) if prefix else ":" not in key)][:10]
+        print(f"Häufigste {label}:", ", ".join(f"{key.split(':')[-1]} ({n})" for key, n in counts))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="http://macmini.local:11434")
     parser.add_argument("--model", default="gemma3:12b")
-    parser.add_argument("--candidates", type=int, default=5)
+    # 6 instead of 5 gives the repetition score something to choose from and still ends before
+    # 06:00 when the batch starts at 02:00.
+    parser.add_argument("--candidates", type=int, default=6)
     parser.add_argument("--keep", type=int, default=2, help="poems stored per time")
     parser.add_argument("--first-hour", type=int, default=6, help="clockwork shows poems from 06:00")
     parser.add_argument("--last-hour", type=int, default=22, help="inclusive, 22 means up to 22:55 like the cron job")
     parser.add_argument("--step", type=int, default=5, help="minutes between times, clockwork shows a new poem every 5")
     parser.add_argument("--out", type=Path, default=Path("var/daily"))
+    parser.add_argument("--dictionary", type=Path,
+                        help="Hunspell dictionary without extension, e.g. de_DE_frami, needs spylls")
     generate(parser.parse_args())
 
 
