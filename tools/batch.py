@@ -77,7 +77,8 @@ ARTICLE_BEFORE_TIME = re.compile(r"\b(der|die|das|den|dem)\s+\d\d:\d\d", re.IGNO
 SUFFIX_AFTER_TIME = re.compile(r"\d\d:\d\d[a-zäöü]", re.IGNORECASE)
 # Elisions like "leis'" or "Will'" were mostly forced rhymes.
 ELISION = re.compile(r"[a-zäöüß]['’]", re.IGNORECASE)
-# Repeated openings and rhyme pairs weigh more than a repeated word when choosing poems.
+# Repeated openings and rhyme sounds weigh more than a repeated word when choosing poems.
+# Penalizing only identical rhyme pairs pushed gemma3 to rein, schein, fein, klein and allein.
 OPENING_WEIGHT = 8
 RHYME_WEIGHT = 8
 # Longer poems shrink the font on the display. 110 characters keep it at the size most
@@ -201,14 +202,14 @@ def opening(poem):
     return "anfang:" + " ".join(poem.lower().split()[:2])
 
 
-def rhyme_pair(poem):
-    return "reim:" + "/".join(sorted(last_word(line) for line in poem.splitlines()))
+def rhyme_sound(poem):
+    return "reim:" + rhyme_core(last_word(poem.splitlines()[0]))
 
 
 def repetition_score(poem, usage):
-    """Lower is better: how often the poem's words, opening and rhyme pair were already used."""
+    """Lower is better: how often the poem's words, opening and rhyme sound were already used."""
     return (sum(usage[word] for word in content_words(poem))
-            + OPENING_WEIGHT * usage[opening(poem)] + RHYME_WEIGHT * usage[rhyme_pair(poem)])
+            + OPENING_WEIGHT * usage[opening(poem)] + RHYME_WEIGHT * usage[rhyme_sound(poem)])
 
 
 def load_dictionary(path):
@@ -276,7 +277,7 @@ def generate(args):
         valid = [c["poem"] for c in candidates if c["rejected"] is None]
         chosen = sorted(valid, key=lambda poem: repetition_score(poem, usage))[:args.keep]
         for poem in chosen:
-            usage.update(content_words(poem) | {opening(poem), rhyme_pair(poem)})
+            usage.update(content_words(poem) | {opening(poem), rhyme_sound(poem)})
         if chosen:
             write_storage(args.out, clock_time, chosen)
 
